@@ -1,0 +1,4 @@
+pandas==2.2.2
+ccxt==4.3.82
+google-cloud-bigquery==3.25.0
+pyarrow==17.0.0
