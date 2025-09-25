@@ -12,7 +12,17 @@ TIMEFRAMES = os.environ.get("ALPHAGINI_TIMEFRAMES","1h,1d").split(",")
 BACKFILL_DAYS = int(os.environ.get("ALPHAGINI_BACKFILL_DAYS","365"))
 INCREMENTAL_LIMIT = int(os.environ.get("ALPHAGINI_INCREMENTAL_LIMIT","1500"))  # max klines per call
 
-def ms(dt): return int(pd.Timestamp(dt, tz="UTC").value/1e6)
+def _ms(dt) -> int:
+    """
+    Convert a datetime-like to epoch milliseconds in UTC.
+    Handles both tz-naive and tz-aware inputs.
+    """
+    ts = pd.Timestamp(dt)
+    if ts.tzinfo is None or ts.tz is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return int(ts.value / 1e6)
 
 def fetch_binance(symbol, timeframe, since_ms=None, limit=1000):
     ex = ccxt.binance({"enableRateLimit": True, "options": {"adjustForTimeDifference": True}})
@@ -68,11 +78,13 @@ def run():
             # incremental: start from last ts, else backfill N days
             last = last_ts_in_bq(bq, sym, tf)
             if last:
-                since_ms = int(last.timestamp()*1000)
+                #  last comes back tz-aware from BigQuery; normalize to UTC then to ms
+                since_ms = _ms(last)
                 df = fetch_binance(sym, tf, since_ms=since_ms, limit=INCREMENTAL_LIMIT)
             else:
-                start = pd.Timestamp.utcnow().floor("D") - pd.Timedelta(days=BACKFILL_DAYS)
-                df = fetch_binance(sym, tf, since_ms=ms(start), limit=INCREMENTAL_LIMIT)
+                # use an explicit UTC start time (naive -> localize)
+                start = pd.Timestamp.now(tz="UTC").floor("T") - pd.Timedelta(days=BACKFILL_DAYS)
+                df = fetch_binance(sym, tf, since_ms=_ms(start), limit=INCREMENTAL_LIMIT)
             # basic QA
             if not df.empty:
                 df = df.drop_duplicates(subset=["exchange","symbol","timeframe","ts"]).sort_values("ts")
