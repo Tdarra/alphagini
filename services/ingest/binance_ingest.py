@@ -7,6 +7,7 @@ import pandas as pd
 import ccxt
 from google.cloud import bigquery
 from google.api_core.exceptions import NotFound, Forbidden
+from requests import exceptions as requests_exceptions
 
 
 # ========= Logging setup =========
@@ -29,6 +30,7 @@ BACKFILL_DAYS = int(os.environ.get("ALPHAGINI_BACKFILL_DAYS", "3650"))
 PAGE_LIMIT = int(os.environ.get("ALPHAGINI_INCREMENTAL_LIMIT", "1000"))  # max candles per Binance call
 MAX_PAGES = int(os.environ.get("ALPHAGINI_MAX_PAGES", "0"))  # 0 = unlimited
 EXTRA_SLEEP_MS = int(os.environ.get("ALPHAGINI_SLEEP_MS", "0"))  # add sleep per page to be polite (ms)
+EXCHANGE_ID = os.environ.get("ALPHAGINI_CCXT_EXCHANGE", "binance").strip().lower()
 
 
 # ========= Helpers =========
@@ -93,7 +95,7 @@ def check_permissions(bq: bigquery.Client):
 
 def fetch_and_load_symbol_tf(
     bq: bigquery.Client,
-    ex: ccxt.binance,
+    ex: ccxt.Exchange,
     symbol: str,
     timeframe: str,
 ):
@@ -135,7 +137,7 @@ def fetch_and_load_symbol_tf(
         # Convert and clean *this page only*
         df = pd.DataFrame(batch, columns=["ms", "open", "high", "low", "close", "volume"])
         df["ts"] = pd.to_datetime(df["ms"], unit="ms", utc=True)
-        df["exchange"], df["symbol"], df["timeframe"] = "binance", symbol, timeframe
+        df["exchange"], df["symbol"], df["timeframe"] = EXCHANGE_ID, symbol, timeframe
         df = df[["exchange", "symbol", "timeframe", "ts", "open", "high", "low", "close", "volume"]]
         before = len(df)
         df = df.drop_duplicates(subset=["exchange", "symbol", "timeframe", "ts"]).sort_values("ts")
@@ -155,10 +157,11 @@ def fetch_and_load_symbol_tf(
             q = f"""
             SELECT COUNT(*) AS rows
             FROM `{TABLE_ID}`
-            WHERE exchange='binance' AND symbol=@s AND timeframe=@tf
+            WHERE exchange=@ex AND symbol=@s AND timeframe=@tf
             """
             job = bq.query(q, job_config=bigquery.QueryJobConfig(
                 query_parameters=[
+                    bigquery.ScalarQueryParameter("ex", "STRING", EXCHANGE_ID),
                     bigquery.ScalarQueryParameter("s", "STRING", symbol),
                     bigquery.ScalarQueryParameter("tf", "STRING", timeframe),
                 ]
@@ -188,12 +191,13 @@ def fetch_and_load_symbol_tf(
 def last_ts_in_bq(client: bigquery.Client, symbol: str, timeframe: str):
     q = f"""
     SELECT MAX(ts) AS ts FROM `{TABLE_ID}`
-    WHERE exchange='binance' AND symbol=@s AND timeframe=@tf
+    WHERE exchange=@ex AND symbol=@s AND timeframe=@tf
     """
     job = client.query(
         q,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
+                bigquery.ScalarQueryParameter("ex", "STRING", EXCHANGE_ID),
                 bigquery.ScalarQueryParameter("s", "STRING", symbol),
                 bigquery.ScalarQueryParameter("tf", "STRING", timeframe),
             ]
@@ -214,8 +218,27 @@ def run():
     check_permissions(bq)
 
     # Create a single Binance client (reused across all loops)
-    ex = ccxt.binance({"enableRateLimit": True, "options": {"adjustForTimeDifference": True}})
-    _ = ex.load_markets()  # warm-up & verify connectivity
+    log.info(f"Using ccxt exchange '{EXCHANGE_ID}'")
+    try:
+        exchange_cls = getattr(ccxt, EXCHANGE_ID)
+    except AttributeError as exc:
+        raise ValueError(
+            f"Unknown CCXT exchange id '{EXCHANGE_ID}'. Set ALPHAGINI_CCXT_EXCHANGE to a valid ccxt exchange"
+        ) from exc
+
+    ex = exchange_cls({"enableRateLimit": True, "options": {"adjustForTimeDifference": True}})
+    try:
+        _ = ex.load_markets()  # warm-up & verify connectivity
+    except requests_exceptions.HTTPError as exc:
+        status = getattr(exc.response, "status_code", None)
+        if status == 403:
+            log.error(
+                "HTTP 403 from %s when loading markets. This often happens when the chosen exchange "
+                "blocks traffic from the region Cloud Run is running in. If you are in the US, try "
+                "setting ALPHAGINI_CCXT_EXCHANGE=binanceus or supply VPN/proxy settings.",
+                EXCHANGE_ID,
+            )
+        raise
 
     for sym in SYMBOLS:
         for tf in TIMEFRAMES:
