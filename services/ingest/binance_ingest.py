@@ -75,7 +75,7 @@ def ensure_table(bq: bigquery.Client):
 
     # Row count snapshot
     try:
-        q = f"SELECT COUNT(*) AS rows FROM `{TABLE_ID}`"
+        q = f"SELECT COUNT(*) AS row_count FROM `{TABLE_ID}`"
         rows = list(bq.query(q).result())[0].rows
         log.info(f"BigQuery table ready: {TABLE_ID} | existing_rows={rows}")
     except Exception as e:
@@ -164,7 +164,7 @@ def fetch_and_load_symbol_tf(
         # After load, fetch updated table count for this symbol/timeframe (cheap via partition scan)
         try:
             q = f"""
-            SELECT COUNT(*) AS rows
+            SELECT COUNT(*) AS row_count
             FROM `{TABLE_ID}`
             WHERE exchange=@ex AND symbol=@s AND timeframe=@tf
             """
@@ -189,10 +189,7 @@ def fetch_and_load_symbol_tf(
         # Respect rate limit + optional extra politeness
         time.sleep(max(ex.rateLimit / 1000.0, 0.001) + (EXTRA_SLEEP_MS / 1000.0))
 
-        # If Binance returned a short page, we're likely done
-        if before < PAGE_LIMIT:
-            log.info(f"{symbol} {timeframe} | short page ({before}<{PAGE_LIMIT}); stopping.")
-            break
+       
 
     log.info(f"{symbol} {timeframe} | completed pages={pages}, rows_loaded={total_rows}")
 
@@ -226,7 +223,7 @@ def run():
     ensure_table(bq)
     check_permissions(bq)
 
-    # Create a single Binance client (reused across all loops)
+    # Create a single client (reused across all loops)
     log.info(f"Using ccxt exchange '{EXCHANGE_ID}'")
     try:
         exchange_cls = getattr(ccxt, EXCHANGE_ID)
