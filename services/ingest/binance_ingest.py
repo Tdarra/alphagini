@@ -30,7 +30,7 @@ BACKFILL_DAYS = int(os.environ.get("ALPHAGINI_BACKFILL_DAYS", "3650"))
 PAGE_LIMIT = int(os.environ.get("ALPHAGINI_INCREMENTAL_LIMIT", "1000"))  # max candles per Binance call
 MAX_PAGES = int(os.environ.get("ALPHAGINI_MAX_PAGES", "0"))  # 0 = unlimited
 EXTRA_SLEEP_MS = int(os.environ.get("ALPHAGINI_SLEEP_MS", "0"))  # add sleep per page to be polite (ms)
-EXCHANGE_ID = os.environ.get("ALPHAGINI_CCXT_EXCHANGE", "binance").strip().lower()
+EXCHANGE_ID = os.environ.get("ALPHAGINI_EXCHANGE", "kraken")  # 'kraken' by default
 
 
 # ========= Helpers =========
@@ -92,6 +92,15 @@ def check_permissions(bq: bigquery.Client):
                   "'roles/bigquery.jobUser' and 'roles/bigquery.dataEditor'.")
         raise e
 
+def get_exchange():
+    cls = getattr(ccxt, EXCHANGE_ID)
+    ex = cls({"enableRateLimit": True, "options": {"adjustForTimeDifference": True}})
+    ex.load_markets()
+    return ex
+
+def symbol_is_listed(ex, symbol: str) -> bool:
+    # ccxt uses unified symbols like "BTC/USD"
+    return symbol in ex.markets
 
 def fetch_and_load_symbol_tf(
     bq: bigquery.Client,
@@ -226,7 +235,7 @@ def run():
             f"Unknown CCXT exchange id '{EXCHANGE_ID}'. Set ALPHAGINI_CCXT_EXCHANGE to a valid ccxt exchange"
         ) from exc
 
-    ex = exchange_cls({"enableRateLimit": True, "options": {"adjustForTimeDifference": True}})
+    ex = get_exchange()
     try:
         _ = ex.load_markets()  # warm-up & verify connectivity
     except requests_exceptions.HTTPError as exc:
@@ -241,6 +250,9 @@ def run():
         raise
 
     for sym in SYMBOLS:
+        if not symbol_is_listed(ex, sym):
+            log.warning(f"{sym} not listed on {EXCHANGE_ID}; skipping.")
+            continue
         for tf in TIMEFRAMES:
             fetch_and_load_symbol_tf(bq, ex, sym, tf)
 
