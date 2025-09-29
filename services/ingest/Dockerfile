@@ -20,4 +20,4 @@ RUN pip install --no-cache-dir -U pip setuptools wheel && \
 # Copy the app
 COPY . .
 
-CMD ["python","binance_ingest.py"]
+CMD ["python","ccxt_ingest.py"]
