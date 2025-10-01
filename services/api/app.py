@@ -1,118 +1,245 @@
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
-from typing import List, Optional, Literal
-import os, math
-import pandas as pd
-from google.cloud import bigquery
-from statsmodels.tsa.arima.model import ARIMA
+import hashlib, json, os, time
+from dataclasses import asdict, dataclass
+from typing import Dict, List
+
 import numpy as np
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from google.cloud import bigquery
 
-app = FastAPI(title="alphagini API")
+PROJECT = os.environ.get("ALPHAGINI_PROJECT")
+DATASET_MD = os.environ.get("ALPHAGINI_BQ_DATASET", "alphagini_marketdata")
+TABLE_OHLCV = f"{PROJECT}.{DATASET_MD}.ohlcv"
 
-PROJECT = os.environ["ALPHAGINI_PROJECT"]
-DATASET = os.environ.get("ALPHAGINI_BQ_DATASET","alphagini_marketdata")
-TABLE = f"{PROJECT}.{DATASET}.ohlcv"
+DATASET_EXP = os.environ.get("ALPHAGINI_EXP_DATASET", "alphagini_experiments")
+TABLE_BT = f"{PROJECT}.{DATASET_EXP}.backtests"
 
+app = FastAPI(title="alphagini-api", version="0.1")
+
+# Allow browser UI by default
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+)
+
+# ---------- Models ----------
 class BacktestRequest(BaseModel):
-    symbol: str              # e.g., "BTC/USD"
-    timeframe: Literal["5m","1h","1d"]
-    start: str               # ISO, e.g., "2023-01-01T00:00:00Z"
-    end: str                 # ISO, e.g., "2023-12-31T00:00:00Z"
-    model: Literal["arima","naive","sma"] = "arima"
-    strategy: Literal["buy_hold","sma_cross"] = "buy_hold"
-    cash_start: float = 100000.0
+    symbol: str
+    timeframe: str = Field(pattern=r"^\d+[smhdw]|[smhdw]$", default="5m")
+    start: str
+    end: str
+    model: str = Field(pattern=r"^(naive|sma)$", default="naive")  # keep simple & fast
+    strategy: str = Field(pattern=r"^(buy_hold|sma_cross)$", default="buy_hold")
+    cash_start: float = 100_000.0
+    # strategy params (optional)
+    sma_fast: int = 10
+    sma_slow: int = 30
 
-def load_ohlcv(symbol, timeframe, start, end) -> pd.DataFrame:
-    bq = bigquery.Client()
-    q = f"""
-    SELECT ts, open, high, low, close, volume
-    FROM `{TABLE}`
-    WHERE symbol=@s AND timeframe=@tf AND ts BETWEEN @start AND @end
-    ORDER BY ts
-    """
-    job = bq.query(q, job_config=bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("s","STRING",symbol),
-            bigquery.ScalarQueryParameter("tf","STRING",timeframe),
-            bigquery.ScalarQueryParameter("start","TIMESTAMP",start),
-            bigquery.ScalarQueryParameter("end","TIMESTAMP",end),
-        ]
-    ))
-    df = job.result().to_dataframe(create_bqstorage_client=False)
-    if df.empty:
-        raise HTTPException(404, "No data for given window.")
-    return df
+@dataclass
+class EquityMetrics:
+    sharpe: float
+    win_rate: float
+    max_drawdown: float
+    abs_return_usd: float
+    rel_return: float
 
-def metrics_from_equity(equity: pd.Series, freq_per_year: int) -> dict:
-    rets = equity.pct_change().dropna()
-    # annualized sharpe (risk-free ~0 for crypto)
-    sharpe = (rets.mean() * freq_per_year) / (rets.std(ddof=0) * math.sqrt(freq_per_year)) if len(rets)>1 else float("nan")
-    cumret = equity.iloc[-1] / equity.iloc[0] - 1.0
-    # max drawdown
-    roll_max = equity.cummax()
-    drawdown = (equity/roll_max - 1.0).min()
-    win_rate = (rets > 0).mean() if len(rets) else float("nan")
-    return {"sharpe": float(sharpe), "cum_return": float(cumret), "max_drawdown": float(drawdown), "win_rate": float(win_rate)}
+# ---------- Utils ----------
+def bq() -> bigquery.Client:
+    return bigquery.Client(project=PROJECT)
 
 def periods_per_year(tf: str) -> int:
-    return {"5m": 365*24*12, "1h": 365*24, "1d": 365}[tf]
+    # approximate for intraday
+    mult = int(tf[:-1]) if tf[:-1].isdigit() else 1
+    unit = tf[-1]
+    if unit == "m": return int((365*24*60)/mult)
+    if unit == "h": return int((365*24)/mult)
+    if unit == "d": return int(365/mult)
+    if unit == "w": return int(52/mult)
+    return 365
 
-def model_predict(df: pd.DataFrame, model: str) -> pd.Series:
-    y = df["close"].astype(float).values
+def load_ohlcv(symbol: str, timeframe: str, start: str, end: str) -> pd.DataFrame:
+    client = bq()
+    q = f"""
+      SELECT ts, open, high, low, close, volume
+      FROM `{TABLE_OHLCV}`
+      WHERE symbol=@s AND timeframe=@tf
+        AND ts BETWEEN @start AND @end
+      ORDER BY ts
+    """
+    job = client.query(
+        q,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("s","STRING", symbol),
+                bigquery.ScalarQueryParameter("tf","STRING", timeframe),
+                bigquery.ScalarQueryParameter("start","TIMESTAMP", start),
+                bigquery.ScalarQueryParameter("end","TIMESTAMP", end),
+            ]
+        ),
+    )
+    df = job.result().to_dataframe(create_bqstorage_client=False)
+    if df.empty:
+        raise HTTPException(status_code=404, detail="No data for given window")
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    df = df.set_index("ts").sort_index()
+    return df
+
+# ---------- Models (predictions) ----------
+def model_predict(df: pd.DataFrame, model: str, sma_fast=10, sma_slow=30) -> pd.Series:
+    y = df["close"].astype(float)
     if model == "naive":
-        preds = np.r_[y[0], y[:-1]]
-    elif model == "sma":
-        preds = pd.Series(y).rolling(10, min_periods=1).mean().values
-    else:  # "arima" baseline
-        # small ARIMA for a quick baseline; production would tune/order-select
-        try:
-            m = ARIMA(y, order=(1,1,1)).fit(method_kwargs={"warn_convergence": False})
-            fc = m.predict(start=1, end=len(y)-1)
-            preds = np.r_[y[0], fc]
-        except Exception:
-            preds = np.r_[y[0], y[:-1]]
-    return pd.Series(preds, index=df.index)
+        return y.shift(1).fillna(y.iloc[0])
+    if model == "sma":
+        return y.rolling(sma_fast, min_periods=1).mean()
+    raise ValueError("unknown model")
 
-def strategy_equity(df: pd.DataFrame, strategy: str, cash_start: float) -> pd.Series:
-    px = df["close"].astype(float)
-    if strategy == "sma_cross":
-        sma_fast = px.rolling(10, min_periods=1).mean()
-        sma_slow = px.rolling(30, min_periods=1).mean()
-        signal = (sma_fast > sma_slow).astype(int)  # 1 long, 0 flat
-    else:
-        signal = pd.Series(1, index=px.index)       # buy & hold
-    rets = signal.shift(1).fillna(0) * px.pct_change().fillna(0)
-    equity = (1 + rets).cumprod() * cash_start
-    return equity
+# ---------- Strategies ----------
+def equity_buy_hold(df: pd.DataFrame, cash_start: float) -> pd.Series:
+    price = df["close"].astype(float)
+    units = cash_start / price.iloc[0]
+    return units * price
+
+def equity_sma_cross(df: pd.DataFrame, cash_start: float, sma_fast=10, sma_slow=30) -> pd.Series:
+    price = df["close"].astype(float)
+    fast = price.rolling(sma_fast, min_periods=1).mean()
+    slow = price.rolling(sma_slow, min_periods=1).mean()
+    long = (fast > slow).astype(int)
+    long = long.shift(1).fillna(0)  # trade on next bar
+    # simple 1x long/flat strategy, no fees/slippage
+    equity = [cash_start]
+    units = 0.0
+    cash = cash_start
+    prev_price = price.iloc[0]
+    for p, pos in zip(price.iloc[1:], long.iloc[1:]):
+        # adjust exposure
+        if pos and units == 0.0:  # enter
+            units = cash / p; cash = 0
+        if not pos and units > 0.0:  # exit
+            cash = units * p; units = 0.0
+        eq = cash + units * p
+        equity.append(eq)
+        prev_price = p
+    return pd.Series([cash_start] + equity, index=price.index)
+
+# ---------- Metrics ----------
+def metrics_from_equity(eq: pd.Series, ppyr: int) -> EquityMetrics:
+    rets = eq.pct_change().dropna()
+    if len(rets) == 0:
+        return EquityMetrics(0.0, 0.0, 0.0, float(eq.iloc[-1]-eq.iloc[0]), float(eq.iloc[-1]/eq.iloc[0]-1))
+    sharpe = float(np.sqrt(ppyr) * (rets.mean() / (rets.std() + 1e-9)))
+    win_rate = float((rets > 0).mean())
+    roll_max = eq.cummax()
+    dd = (eq/roll_max - 1.0).min()
+    mdd = float(dd)
+    abs_ret = float(eq.iloc[-1] - eq.iloc[0])
+    rel_ret = float(eq.iloc[-1]/eq.iloc[0] - 1.0)
+    return EquityMetrics(sharpe, win_rate, mdd, abs_ret, rel_ret)
+
+# ---------- Persistence / Cache ----------
+def cache_key(req: BacktestRequest) -> str:
+    payload = {
+        "symbol": req.symbol, "tf": req.timeframe, "start": req.start, "end": req.end,
+        "model": req.model, "strategy": req.strategy, "cash": req.cash_start,
+        "sma_fast": req.sma_fast, "sma_slow": req.sma_slow,
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+def fetch_cached(req: BacktestRequest):
+    client = bq()
+    q = f"""
+      SELECT id, metrics_json
+      FROM `{TABLE_BT}`
+      WHERE symbol=@s AND timeframe=@tf AND start_ts=@st AND end_ts=@en
+        AND model=@m AND strategy=@str AND id=@id
+      ORDER BY requested_at DESC LIMIT 1
+    """
+    job = client.query(
+        q,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("s","STRING", req.symbol),
+                bigquery.ScalarQueryParameter("tf","STRING", req.timeframe),
+                bigquery.ScalarQueryParameter("st","TIMESTAMP", req.start),
+                bigquery.ScalarQueryParameter("en","TIMESTAMP", req.end),
+                bigquery.ScalarQueryParameter("m","STRING", req.model),
+                bigquery.ScalarQueryParameter("str","STRING", req.strategy),
+                bigquery.ScalarQueryParameter("id","STRING", cache_key(req)),
+            ]
+        ),
+    )
+    rows = list(job.result())
+    return None if not rows else json.loads(rows[0].metrics_json)
+
+def persist_result(req: BacktestRequest, metrics: Dict, duration_ms: int):
+    client = bq()
+    row = {
+        "id": cache_key(req),
+        "requested_at": pd.Timestamp.utcnow().isoformat(),
+        "symbol": req.symbol,
+        "timeframe": req.timeframe,
+        "start_ts": req.start,
+        "end_ts": req.end,
+        "model": req.model,
+        "strategy": req.strategy,
+        "params_json": json.dumps({"sma_fast": req.sma_fast, "sma_slow": req.sma_slow}),
+        "metrics_json": json.dumps(metrics),
+        "duration_ms": duration_ms,
+    }
+    client.insert_rows_json(TABLE_BT, [row])
+
+# ---------- Endpoints ----------
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.get("/symbols")
+def symbols():
+    client = bq()
+    q = f"""
+      SELECT symbol, timeframe, MIN(ts) first_ts, MAX(ts) last_ts, COUNT(*) row_count
+      FROM `{TABLE_OHLCV}`
+      GROUP BY symbol, timeframe
+      ORDER BY symbol, timeframe
+    """
+    return [dict(r) for r in client.query(q).result()]
 
 @app.post("/backtest")
 def backtest(req: BacktestRequest):
+    t0 = time.time()
+    # try cache first
+    cached = fetch_cached(req)
+    if cached:
+        cached["_cached"] = True
+        return {"summary": req.model_dump(), "metrics": cached, "equity_curve": []}
+
     df = load_ohlcv(req.symbol, req.timeframe, req.start, req.end)
-    df = df.set_index(pd.to_datetime(df["ts"], utc=True))
-    preds = model_predict(df, req.model)
-    # quick model error metrics
+
+    # forecast series (we calculate RMSE vs close)
+    preds = model_predict(df, req.model, req.sma_fast, req.sma_slow)
     err = df["close"].astype(float) - preds
     rmse = float(np.sqrt(np.mean(err**2)))
-    # compare to ARIMA baseline
-    base = model_predict(df, "arima")
-    rmse_base = float(np.sqrt(np.mean((df["close"].astype(float) - base)**2)))
-    # strategy equity & metrics
-    equity = strategy_equity(df, req.strategy, req.cash_start)
-    m = metrics_from_equity(equity, periods_per_year(req.timeframe))
-    # relative/absolute returns on $100k
-    abs_ret = float(equity.iloc[-1] - req.cash_start)
-    rel_ret = float(equity.iloc[-1] / req.cash_start - 1.0)
-    return {
-        "summary": {
-            "symbol": req.symbol, "timeframe": req.timeframe,
-            "start": req.start, "end": req.end,
-            "model": req.model, "strategy": req.strategy
-        },
-        "metrics": {
-            **m, "abs_return_usd": abs_ret, "rel_return": rel_ret,
-            "rmse": rmse, "rmse_arima_baseline": rmse_base
-        },
-        "equity_curve": [
-            {"ts": str(ts), "equity": float(val)} for ts, val in equity.items()
-        ],
+
+    # equity
+    if req.strategy == "buy_hold":
+        eq = equity_buy_hold(df, req.cash_start)
+    else:
+        eq = equity_sma_cross(df, req.cash_start, req.sma_fast, req.sma_slow)
+
+    m = metrics_from_equity(eq, periods_per_year(req.timeframe))
+    metrics = {
+        "sharpe": m.sharpe,
+        "win_rate": m.win_rate,
+        "max_drawdown": m.max_drawdown,
+        "abs_return_usd": m.abs_return_usd,
+        "rel_return": m.rel_return,
+        "rmse": rmse,
     }
+    duration_ms = int((time.time() - t0) * 1000)
+
+    # persist
+    persist_result(req, metrics, duration_ms)
+
+    curve = [{"ts": str(ts), "equity": float(val)} for ts, val in eq.items()]
+    return {"summary": req.model_dump(), "metrics": metrics, "equity_curve": curve}

@@ -1,13 +1,15 @@
-FROM gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-
-# Install Python & pip
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip && \
-    rm -rf /var/lib/apt/lists/*
-    
+FROM node:20-slim AS build
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+COPY package*.json ./
+RUN npm ci
 COPY . .
-ENV PORT=8080
-CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080"]
+RUN npm run build
+
+FROM gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build /app ./
+ENV HOST=0.0.0.0 PORT=8080
+EXPOSE 8080
+CMD ["npm","start","--","-p","8080"]
+
