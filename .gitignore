@@ -1,3 +1,5 @@
 /services/ingest/venv_ccxt/
 /.idea
 /taj_notes.txt
+/services/ingest/*.csv
+/services/ingest/normalized/*.csv
