@@ -30,7 +30,7 @@ TIMEFRAMES = [t.strip() for t in os.environ.get("ALPHAGINI_TIMEFRAMES", "5m").sp
 EXCHANGE_ID = os.environ.get("ALPHAGINI_EXCHANGE", "kraken")
 
 # Backfill controls
-BACKFILL_DAYS = int(os.environ.get("ALPHAGINI_BACKFILL_DAYS", "3650"))
+BACKFILL_DAYS = int(os.environ.get("ALPHAGINI_BACKFILL_DAYS", "30"))
 PAGE_LIMIT = int(os.environ.get("ALPHAGINI_INCREMENTAL_LIMIT", "720"))  # Kraken ≈ 720 max per call
 MAX_PAGES = int(os.environ.get("ALPHAGINI_MAX_PAGES", "0"))  # 0 = unlimited
 EXTRA_SLEEP_MS = int(os.environ.get("ALPHAGINI_SLEEP_MS", "0"))

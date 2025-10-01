@@ -9,10 +9,10 @@ import pandas as pd
 from datetime import datetime
 
 # Test symbols
-SYMBOLS = ["BTC/USDT", "ETH/USDT", "XRP/USDT", "SOL/USDT"]
+SYMBOLS = ["BTC/USD", "ETH/USD"]
 
 # Target date for historical data requirement
-TARGET_DATE_2015 = datetime(2015, 1, 1)
+TARGET_DATE_2015 = datetime(2025, 9, 9)
 TARGET_MS_2015 = int(TARGET_DATE_2015.timestamp() * 1000)
 
 # Potential US-friendly exchanges to test
@@ -57,7 +57,7 @@ def test_exchange_2015_data(exchange_id: str):
                 # Try to fetch data from 2015-01-01
                 data_2015 = exchange.fetch_ohlcv(
                     symbol, 
-                    '1d', 
+                    '5m', 
                     since=TARGET_MS_2015, 
                     limit=10  # Get first 10 days of 2015
                 )
@@ -66,14 +66,14 @@ def test_exchange_2015_data(exchange_id: str):
                     first_date = pd.to_datetime(data_2015[0][0], unit='ms')
                     last_date = pd.to_datetime(data_2015[-1][0], unit='ms')
                     
-                    # Check if data starts in 2015
-                    if first_date.year == 2015:
-                        print(f"   ✅ {symbol} - 2015 data available! ({first_date.date()} to {last_date.date()})")
+                    # Check if data starts in 2025
+                    if first_date.year == 2025:
+                        print(f"   ✅ {symbol} - 2025 data available! ({first_date.date()} to {last_date.date()})")
                         symbols_with_2015_data.append(symbol)
                     else:
-                        print(f"   ⚠️  {symbol} - Data starts from {first_date.date()} (not 2015)")
+                        print(f"   ⚠️  {symbol} - Data starts from {first_date.date()} (not 2025)")
                 else:
-                    print(f"   ❌ {symbol} - No data from 2015")
+                    print(f"   ❌ {symbol} - No data from 2025")
                     
             except Exception as e:
                 print(f"   ❌ {symbol} - Error: {str(e)[:80]}...")
