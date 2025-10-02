@@ -103,25 +103,29 @@ def equity_buy_hold(df: pd.DataFrame, cash_start: float) -> pd.Series:
 
 def equity_sma_cross(df: pd.DataFrame, cash_start: float, sma_fast=10, sma_slow=30) -> pd.Series:
     price = df["close"].astype(float)
+
     fast = price.rolling(sma_fast, min_periods=1).mean()
     slow = price.rolling(sma_slow, min_periods=1).mean()
     long = (fast > slow).astype(int)
-    long = long.shift(1).fillna(0)  # trade on next bar
-    # simple 1x long/flat strategy, no fees/slippage
-    equity = [cash_start]
+    long = long.shift(1).fillna(0)  # act on next bar
+
+    equity: list[float] = [cash_start]
     units = 0.0
     cash = cash_start
-    prev_price = price.iloc[0]
-    for p, pos in zip(price.iloc[1:], long.iloc[1:]):
-        # adjust exposure
-        if pos and units == 0.0:  # enter
-            units = cash / p; cash = 0
-        if not pos and units > 0.0:  # exit
-            cash = units * p; units = 0.0
-        eq = cash + units * p
-        equity.append(eq)
-        prev_price = p
-    return pd.Series([cash_start] + equity, index=price.index)
+
+    # one equity value per bar after the first
+    for p, pos in zip(price.iloc[1:].values, long.iloc[1:].values):
+        if pos and units == 0.0:      # enter long
+            units = cash / p
+            cash = 0.0
+        elif (not pos) and units > 0: # exit long
+            cash = units * p
+            units = 0.0
+
+        equity.append(cash + units * p)
+
+    # equity has exactly len(price) values now
+    return pd.Series(equity, index=price.index)
 
 # ---------- Metrics ----------
 def metrics_from_equity(eq: pd.Series, ppyr: int) -> EquityMetrics:

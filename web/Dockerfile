@@ -1,15 +1,29 @@
-FROM node:20-slim AS build
+# --- deps
+FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
+
+# --- build
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+
+# Pass API URL at build time and expose to Next.js build
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
 RUN npm run build
 
-FROM gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-RUN apt-get update && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*
+# --- runtime
+FROM node:20-alpine AS runner
 WORKDIR /app
-COPY --from=build /app ./
-ENV HOST=0.0.0.0 PORT=8080
+ENV NODE_ENV=production
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY package*.json ./
+RUN npm ci --omit=dev
+ENV PORT=8080
 EXPOSE 8080
-CMD ["npm","start","--","-p","8080"]
-
+CMD ["sh", "-c", "npm run start -- -p ${PORT}"]

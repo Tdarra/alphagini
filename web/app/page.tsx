@@ -1,116 +1,190 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
-type SymbolInfo = { symbol: string; timeframe: string; first_ts: string; last_ts: string; rows: number; };
+import React from "react";
 
-export default function Home() {
-  const API = process.env.NEXT_PUBLIC_API_URL!;
-  const [symbols, setSymbols] = useState<SymbolInfo[]>([]);
-  const [symbol, setSymbol] = useState<string>("");
-  const [timeframe, setTimeframe] = useState<string>("5m");
-  const [start, setStart] = useState<string>("");
-  const [end, setEnd] = useState<string>("");
-  const [model, setModel] = useState<"naive"|"sma">("sma");
-  const [strategy, setStrategy] = useState<"buy_hold"|"sma_cross">("sma_cross");
-  const [cash, setCash] = useState<number>(100000);
-  const [fast, setFast] = useState<number>(10);
-  const [slow, setSlow] = useState<number>(30);
-  const [metrics, setMetrics] = useState<any>(null);
-  const [curve, setCurve] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
+type SymbolInfo = {
+  symbol: string;
+  timeframe: string;
+  first_ts: string;
+  last_ts: string;
+  rows: number;
+};
 
-  useEffect(() => {
-    fetch(`${API}/symbols`).then(r => r.json()).then((rows: SymbolInfo[]) => {
-      setSymbols(rows);
-      if (rows.length) {
-        setSymbol(rows[0].symbol);
-        setTimeframe(rows[0].timeframe);
-        setStart(rows[0].first_ts);
-        setEnd(rows[0].last_ts);
+const API_URL = process.env.NEXT_PUBLIC_API_URL!;
+
+function toISOStringZ(local: string) {
+  // local is "YYYY-MM-DDTHH:MM" (no seconds), interpret as local time, convert to Z
+  const d = new Date(local);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+export default function Page() {
+  const [symbols, setSymbols] = React.useState<SymbolInfo[]>([]);
+  const [symbolsLoading, setSymbolsLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const [symbol, setSymbol] = React.useState("");
+  const [timeframe, setTimeframe] = React.useState("5m");
+  const [start, setStart] = React.useState(""); // datetime-local
+  const [end, setEnd] = React.useState("");
+  const [cashStart, setCashStart] = React.useState(100000);
+  const [running, setRunning] = React.useState(false);
+  const [result, setResult] = React.useState<any>(null);
+
+  React.useEffect(() => {
+    (async () => {
+      setSymbolsLoading(true);
+      setError(null);
+      try {
+        const r = await fetch(`${API_URL}/symbols`);
+        if (!r.ok) throw new Error(await r.text());
+        const data: SymbolInfo[] = await r.json();
+        setSymbols(data);
+        if (data.length) setSymbol(data[0].symbol);
+        // default window: last 3 days
+        const now = new Date();
+        const before = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
+        const toLocal = (d: Date) =>
+          new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+        setStart(toLocal(before));
+        setEnd(toLocal(now));
+      } catch (e: any) {
+        setError(`Failed to load symbols: ${e.message || e}`);
+      } finally {
+        setSymbolsLoading(false);
       }
-    });
-  }, [API]);
+    })();
+  }, []);
 
-  const doRun = async () => {
-    setLoading(true);
-    const body = {
-      symbol, timeframe, start, end, model, strategy,
-      cash_start: cash, sma_fast: fast, sma_slow: slow
-    };
-    const r = await fetch(`${API}/backtest`, { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(body) });
-    const j = await r.json();
-    setMetrics(j.metrics);
-    setCurve(j.equity_curve?.map((d:any)=>({ ts: d.ts, equity: d.equity })) ?? []);
-    setLoading(false);
-  };
-
-  const rows = useMemo(()=>symbols.filter(s=>s.symbol===symbol), [symbols, symbol]);
+  async function runBacktest() {
+    setRunning(true);
+    setError(null);
+    setResult(null);
+    try {
+      const payload = {
+        symbol,
+        timeframe,
+        start: toISOStringZ(start),
+        end: toISOStringZ(end),
+        model: "sma",
+        strategy: "sma_cross",
+        cash_start: cashStart,
+        sma_fast: 10,
+        sma_slow: 30,
+      };
+      const r = await fetch(`${API_URL}/backtest`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const data = await r.json();
+      setResult(data);
+    } catch (e: any) {
+      setError(`Backtest failed: ${e.message || e}`);
+    } finally {
+      setRunning(false);
+    }
+  }
 
   return (
-    <main className="p-6 max-w-6xl mx-auto">
-      <h1 className="text-2xl font-semibold mb-4">alphagini — Backtesting</h1>
+    <main style={{ maxWidth: 960, margin: "40px auto", padding: 16 }}>
+      <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 16 }}>alphagini — Backtesting</h1>
 
-      <div className="grid grid-cols-2 gap-4 mb-6">
-        <label>Symbol
-          <select className="border p-2 w-full" value={symbol} onChange={e=>setSymbol(e.target.value)}>
-            {symbols.map((s,i)=><option key={i} value={s.symbol}>{s.symbol}</option>)}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <label>
+          <div>Symbol</div>
+          <select
+            value={symbol}
+            disabled={symbolsLoading}
+            onChange={(e) => setSymbol(e.target.value)}
+            style={{ width: "100%", padding: 8 }}
+          >
+            {symbols.map((s) => (
+              <option key={`${s.symbol}-${s.timeframe}`} value={s.symbol}>
+                {s.symbol}
+              </option>
+            ))}
           </select>
         </label>
-        <label>Timeframe
-          <input className="border p-2 w-full" value={timeframe} onChange={e=>setTimeframe(e.target.value)} />
-        </label>
-        <label>Start (UTC)
-          <input className="border p-2 w-full" value={start} onChange={e=>setStart(e.target.value)} />
-        </label>
-        <label>End (UTC)
-          <input className="border p-2 w-full" value={end} onChange={e=>setEnd(e.target.value)} />
-        </label>
-        <label>Model
-          <select className="border p-2 w-full" value={model} onChange={e=>setModel(e.target.value as any)}>
-            <option value="naive">naive</option>
-            <option value="sma">sma</option>
+
+        <label>
+          <div>Timeframe</div>
+          <select
+            value={timeframe}
+            onChange={(e) => setTimeframe(e.target.value)}
+            style={{ width: "100%", padding: 8 }}
+          >
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
+            <option value="4h">4h</option>
+            <option value="1d">1d</option>
           </select>
         </label>
-        <label>Strategy
-          <select className="border p-2 w-full" value={strategy} onChange={e=>setStrategy(e.target.value as any)}>
-            <option value="buy_hold">buy_hold</option>
-            <option value="sma_cross">sma_cross</option>
-          </select>
+
+        <label>
+          <div>Start (local)</div>
+          <input
+            type="datetime-local"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            style={{ width: "100%", padding: 8 }}
+          />
         </label>
-        <label>Cash start
-          <input type="number" className="border p-2 w-full" value={cash} onChange={e=>setCash(Number(e.target.value))}/>
+
+        <label>
+          <div>End (local)</div>
+          <input
+            type="datetime-local"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            style={{ width: "100%", padding: 8 }}
+          />
         </label>
-        <label>Fast/Slow (SMA)
-          <div className="flex gap-2">
-            <input type="number" className="border p-2 w-full" value={fast} onChange={e=>setFast(Number(e.target.value))}/>
-            <input type="number" className="border p-2 w-full" value={slow} onChange={e=>setSlow(Number(e.target.value))}/>
-          </div>
+
+        <label>
+          <div>Starting cash ($)</div>
+          <input
+            type="number"
+            min={0}
+            step={1000}
+            value={cashStart}
+            onChange={(e) => setCashStart(Number(e.target.value))}
+            style={{ width: "100%", padding: 8 }}
+          />
         </label>
       </div>
 
-      <button onClick={doRun} disabled={loading} className="border px-4 py-2">{loading? "Running…" : "Run backtest"}</button>
+      <div style={{ marginTop: 16, display: "flex", gap: 12 }}>
+        <button
+          onClick={runBacktest}
+          disabled={running || !symbol || !start || !end}
+          style={{
+            padding: "10px 16px",
+            background: running ? "#aaa" : "#111",
+            color: "#fff",
+            borderRadius: 8,
+          }}
+        >
+          {running ? "Running…" : "Run"}
+        </button>
+      </div>
 
-      {metrics && (
-        <div className="mt-6 grid grid-cols-5 gap-4 text-sm">
-          <div>Sharpe<br/><b>{metrics.sharpe.toFixed(2)}</b></div>
-          <div>Win rate<br/><b>{(metrics.win_rate*100).toFixed(1)}%</b></div>
-          <div>Max DD<br/><b>{(metrics.max_drawdown*100).toFixed(1)}%</b></div>
-          <div>Abs Return<br/><b>${metrics.abs_return_usd.toLocaleString()}</b></div>
-          <div>Rel Return<br/><b>{(metrics.rel_return*100).toFixed(2)}%</b></div>
-        </div>
+      {error && (
+        <div style={{ marginTop: 16, color: "#b00020", whiteSpace: "pre-wrap" }}>{error}</div>
       )}
 
-      <div className="mt-6 h-80 border">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={curve}>
-            <XAxis dataKey="ts" hide />
-            <YAxis />
-            <Tooltip />
-            <Line type="monotone" dataKey="equity" dot={false} />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
+      {result && (
+        <pre style={{ marginTop: 16, background: "#f5f5f5", padding: 12, borderRadius: 8 }}>
+          {JSON.stringify(result.summary ?? result, null, 2)}
+        </pre>
+      )}
+
+      <p style={{ marginTop: 24, color: "#666" }}>
+        Tip: date-times are interpreted in your local timezone then converted to UTC for the API.
+      </p>
     </main>
   );
 }
