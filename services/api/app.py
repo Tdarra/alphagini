@@ -1,7 +1,7 @@
 import hashlib, json, os, time
-from dataclasses import asdict, dataclass
-from typing import Dict, List, Any
 import logging
+from dataclasses import asdict, dataclass
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -17,11 +17,10 @@ TABLE_OHLCV = f"{PROJECT}.{DATASET_MD}.ohlcv"
 DATASET_EXP = os.environ.get("ALPHAGINI_EXP_DATASET", "alphagini_experiments")
 TABLE_BT = f"{PROJECT}.{DATASET_EXP}.backtests"
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("alphagini.api")
+
 app = FastAPI(title="alphagini-api", version="0.1")
-
-logger = logging.getLogger("alphagini")
-logger.setLevel(logging.INFO)
-
 
 # Allow browser UI by default
 app.add_middleware(
@@ -54,11 +53,6 @@ class EquityMetrics:
 def bq() -> bigquery.Client:
     return bigquery.Client(project=PROJECT)
 
-def log(logs: List[str], msg: str):
-    m = str(msg)
-    logs.append(m)
-    logger.info(m)
-
 def periods_per_year(tf: str) -> int:
     # approximate for intraday
     mult = int(tf[:-1]) if tf[:-1].isdigit() else 1
@@ -69,16 +63,31 @@ def periods_per_year(tf: str) -> int:
     if unit == "w": return int(52/mult)
     return 365
 
-def load_ohlcv(symbol: str, timeframe: str, start: str, end: str, logs: List[str]) -> pd.DataFrame:
-    # ... your BQ query build ...
-    log(logs, f"load_ohlcv: symbol={symbol}, timeframe={timeframe}, start={start}, end={end}")
-    df = ...  # <== existing query to BQ that returns columns ['ts','open','high','low','close','volume']
+def load_ohlcv(symbol: str, timeframe: str, start: str, end: str) -> pd.DataFrame:
+    client = bq()
+    q = f"""
+      SELECT ts, open, high, low, close, volume
+      FROM `{TABLE_OHLCV}`
+      WHERE symbol=@s AND timeframe=@tf
+        AND ts BETWEEN @start AND @end
+      ORDER BY ts
+    """
+    job = client.query(
+        q,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("s","STRING", symbol),
+                bigquery.ScalarQueryParameter("tf","STRING", timeframe),
+                bigquery.ScalarQueryParameter("start","TIMESTAMP", start),
+                bigquery.ScalarQueryParameter("end","TIMESTAMP", end),
+            ]
+        ),
+    )
+    df = job.result().to_dataframe(create_bqstorage_client=False)
     if df.empty:
-        log(logs, "load_ohlcv: BQ returned 0 rows")
-        return df
+        raise HTTPException(status_code=404, detail="No data for given window")
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
-    df = df.sort_values("ts").set_index("ts")
-    log(logs, f"load_ohlcv: rows={len(df)}, first={df.index.min()}, last={df.index.max()}")
+    df = df.set_index("ts").sort_index()
     return df
 
 # ---------- Models (predictions) ----------
@@ -96,50 +105,31 @@ def equity_buy_hold(df: pd.DataFrame, cash_start: float) -> pd.Series:
     units = cash_start / price.iloc[0]
     return units * price
 
-def equity_sma_cross(price: pd.Series,
-                     cash_start: float,
-                     sma_fast: int,
-                     sma_slow: int,
-                     logs: List[str]) -> pd.Series:
-    """
-    price: pd.Series indexed by timestamp, float
-    returns cumulative equity series aligned 1:1 with price index
-    """
-    log(logs, f"equity_sma_cross: len(price)={len(price)}, fast={sma_fast}, slow={sma_slow}")
+def equity_sma_cross(df: pd.DataFrame, cash_start: float, sma_fast=10, sma_slow=30) -> pd.Series:
+    price = df["close"].astype(float)
 
-    price = price.astype(float)
-    price = price.sort_index()
+    fast = price.rolling(sma_fast, min_periods=1).mean()
+    slow = price.rolling(sma_slow, min_periods=1).mean()
+    long = (fast > slow).astype(int)
+    long = long.shift(1).fillna(0)  # act on next bar
 
-    # SMAs
-    fast = price.rolling(window=sma_fast, min_periods=sma_fast).mean()
-    slow = price.rolling(window=sma_slow, min_periods=sma_slow).mean()
+    equity: list[float] = [cash_start]
+    units = 0.0
+    cash = cash_start
 
-    # Position: 1 when fast>slow else 0. Shift(1) so we trade on next bar open.
-    pos = (fast > slow).astype(int).shift(1).fillna(0)
+    # one equity value per bar after the first
+    for p, pos in zip(price.iloc[1:].values, long.iloc[1:].values):
+        if pos and units == 0.0:      # enter long
+            units = cash / p
+            cash = 0.0
+        elif (not pos) and units > 0: # exit long
+            cash = units * p
+            units = 0.0
 
-    # P&L from close-to-close returns
-    rets = price.pct_change().fillna(0)
+        equity.append(cash + units * p)
 
-    # Strategy returns: position * market returns
-    strat = (pos * rets).fillna(0)
-
-    equity = (1.0 + strat).cumprod() * float(cash_start)
-
-    # logs for sanity
-    cross_count = int(((fast > slow).astype(int).diff() != 0).sum())
-    log(logs, f"SMA signals={cross_count}, first_ts={price.index.min()}, last_ts={price.index.max()}")
-    log(logs, f"NaNs: fast={int(fast.isna().sum())}, slow={int(slow.isna().sum())}")
-
-    # ensure alignment is exact
-    if not equity.index.equals(price.index):
-        log(logs, "WARNING: index misalignment detected; reindexing equity to price.")
-        equity = equity.reindex(price.index)
-
-    # if all NaN due to very short window, fill with starting cash
-    equity = equity.fillna(method="ffill").fillna(float(cash_start))
-
-    log(logs, f"equity len={len(equity)}, min={equity.min():.2f}, max={equity.max():.2f}")
-    return equity
+    # equity has exactly len(price) values now
+    return pd.Series(equity, index=price.index)
 
 # ---------- Metrics ----------
 def metrics_from_equity(eq: pd.Series, ppyr: int) -> EquityMetrics:
@@ -214,6 +204,7 @@ def health():
 
 @app.get("/symbols")
 def symbols():
+    logger.info("Fetching symbols from %s", TABLE_OHLCV)
     client = bq()
     q = f"""
       SELECT symbol, timeframe, MIN(ts) first_ts, MAX(ts) last_ts, COUNT(*) row_count
@@ -221,43 +212,62 @@ def symbols():
       GROUP BY symbol, timeframe
       ORDER BY symbol, timeframe
     """
-    return [dict(r) for r in client.query(q).result()]
+    rows = [dict(r) for r in client.query(q).result()]
+    logger.info("Returning %d symbols", len(rows))
+    return rows
 
 @app.post("/backtest")
 def backtest(req: BacktestRequest):
-    logs: List[str] = []
-    df = load_ohlcv(req.symbol, req.timeframe, req.start, req.end, logs)
-    if df.empty:
-        return JSONResponse(status_code=404, content={"detail": "No data for given window.", "logs": logs})
+    payload = req.model_dump()
+    logger.info("Received backtest request: %s", json.dumps(payload, sort_keys=True))
+    t0 = time.time()
+    cache_id = cache_key(req)
+    # try cache first
+    cached = fetch_cached(req)
+    if cached:
+        logger.info("Cache hit for request %s", cache_id)
+        cached["_cached"] = True
+        logger.info("Returning cached metrics: %s", json.dumps(cached, sort_keys=True))
+        return {"summary": req.model_dump(), "metrics": cached, "equity_curve": []}
 
-    price = df["close"]
-    eq = equity_sma_cross(price, req.cash_start, req.sma_fast, req.sma_slow, logs)
+    df = load_ohlcv(req.symbol, req.timeframe, req.start, req.end)
+    logger.info(
+        "Loaded %d OHLCV rows for %s %s between %s and %s",
+        len(df),
+        req.symbol,
+        req.timeframe,
+        req.start,
+        req.end,
+    )
 
-    # prepare series for the UI
-    # return ISO strings to avoid timezone surprises in the browser
-    ts_iso = [ts.isoformat() for ts in eq.index.to_pydatetime()]
-    equity_vals = eq.round(2).tolist()
+    # forecast series (we calculate RMSE vs close)
+    preds = model_predict(df, req.model, req.sma_fast, req.sma_slow)
+    err = df["close"].astype(float) - preds
+    rmse = float(np.sqrt(np.mean(err**2)))
 
-    # simple metrics (extend as you like)
-    ret_abs = float(equity_vals[-1] - req.cash_start)
-    ret_rel = float(equity_vals[-1] / req.cash_start - 1.0)
+    # equity
+    if req.strategy == "buy_hold":
+        eq = equity_buy_hold(df, req.cash_start)
+    else:
+        eq = equity_sma_cross(df, req.cash_start, req.sma_fast, req.sma_slow)
 
-    payload: Dict[str, Any] = {
-        "summary": {
-            "symbol": req.symbol,
-            "timeframe": req.timeframe,
-            "start": req.start,
-            "end": req.end,
-            "bars": len(ts_iso),
-        },
-        "metrics": {
-            "abs_return": ret_abs,
-            "rel_return": ret_rel,
-        },
-        "series": {
-            "ts": ts_iso,
-            "equity": equity_vals,
-        },
-        "logs": logs[:2000],  # cap to keep responses reasonable
+    m = metrics_from_equity(eq, periods_per_year(req.timeframe))
+    metrics = {
+        "sharpe": m.sharpe,
+        "win_rate": m.win_rate,
+        "max_drawdown": m.max_drawdown,
+        "abs_return_usd": m.abs_return_usd,
+        "rel_return": m.rel_return,
+        "rmse": rmse,
     }
-    return payload
+    duration_ms = int((time.time() - t0) * 1000)
+    logger.info("Computed metrics in %d ms: %s", duration_ms, json.dumps(metrics, sort_keys=True))
+
+    # persist
+    persist_result(req, metrics, duration_ms)
+    logger.info("Persisted backtest result for %s", cache_id)
+
+    curve = [{"ts": str(ts), "equity": float(val)} for ts, val in eq.items()]
+    response_payload = {"summary": req.model_dump(), "metrics": metrics, "equity_curve": curve}
+    logger.info("Sending backtest response with %d equity points", len(response_payload["equity_curve"]))
+    return response_payload

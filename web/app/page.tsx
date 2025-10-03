@@ -31,26 +31,34 @@ export default function Page() {
   const [running, setRunning] = React.useState(false);
   const [result, setResult] = React.useState<any>(null);
   const [logs, setLogs] = React.useState<string[]>([]);
-  const log = (...parts: any[]) => {
-    setLogs((prev) => [
-      ...prev,
-      parts
-        .map((p) => (typeof p === "string" ? p : JSON.stringify(p)))
-        .join(" "),
-    ]);
-  };
 
+  const appendLog = React.useCallback((message: string, data?: unknown) => {
+    const timestamp = new Date().toLocaleTimeString();
+    let serialized = "";
+    if (data !== undefined) {
+      try {
+        serialized = `\n${JSON.stringify(data, null, 2)}`;
+      } catch (err) {
+        serialized = `\n${String(data)}`;
+      }
+    }
+    const line = `[${timestamp}] ${message}${serialized}`;
+    console.log(`[alphagini-web] ${message}`, data);
+    setLogs((prev) => [...prev.slice(-99), line]);
+  }, []);
 
-    React.useEffect(() => {
+  React.useEffect(() => {
     (async () => {
       setSymbolsLoading(true);
       setError(null);
       try {
-        const r = await fetch(`${API_URL}/symbols`);
+        const symbolsEndpoint = `${API_URL}/symbols`;
+        appendLog("Requesting symbol metadata from API", { endpoint: symbolsEndpoint });
+        const r = await fetch(symbolsEndpoint);
         if (!r.ok) throw new Error(await r.text());
         const data: SymbolInfo[] = await r.json();
+        appendLog("Received symbol metadata", data);
         setSymbols(data);
-        log("symbols loaded:", data.length);  // <-- NEW
         if (data.length) setSymbol(data[0].symbol);
         // default window: last 3 days
         const now = new Date();
@@ -60,20 +68,19 @@ export default function Page() {
         setStart(toLocal(before));
         setEnd(toLocal(now));
       } catch (e: any) {
-        setError(`Failed to load symbols: ${e.message || e}`);
-        log("symbols error:", e?.message || e);  // <-- NEW
+        const message = `Failed to load symbols: ${e.message || e}`;
+        appendLog(message);
+        setError(message);
       } finally {
         setSymbolsLoading(false);
       }
     })();
-  }, []);
-
+  }, [appendLog]);
 
   async function runBacktest() {
     setRunning(true);
     setError(null);
     setResult(null);
-    setLogs([]); // clear old logs
     try {
       const payload = {
         symbol,
@@ -86,63 +93,25 @@ export default function Page() {
         sma_fast: 10,
         sma_slow: 30,
       };
-
-      // Client-side breadcrumbs
-      const url = `${API_URL}/backtest`;
-      log("POST", url);
-      log("payload", payload);
-      console.log("[backtest] POST", url, payload);
-
-      const r = await fetch(url, {
+      const endpoint = `${API_URL}/backtest`;
+      appendLog("Submitting backtest request", { endpoint, payload });
+      const r = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-
-      log("status", String(r.status));
-      const ct = r.headers.get("content-type") || "(none)";
-      log("content-type", ct);
-      console.log("[backtest] status:", r.status, "| content-type:", ct);
-
-      // Read body as text first so we can always inspect it
-      const text = await r.text();
-      const preview = text.length > 500 ? text.slice(0, 500) + "…(truncated)" : text;
-      log("body-preview", preview);
-      console.log("[backtest] body-preview:", preview);
-
       if (!r.ok) {
-        throw new Error(text || `HTTP ${r.status}`);
+        const errorText = await r.text();
+        appendLog("Backtest request failed", { endpoint, status: r.status, body: errorText });
+        throw new Error(errorText || `Request failed with status ${r.status}`);
       }
-
-      // Safely parse JSON
-      let data: any = null;
-      try {
-        data = text ? JSON.parse(text) : null;
-      } catch (err: any) {
-        log("json-parse-error", err?.message || String(err));
-        console.error("[backtest] json-parse-error:", err);
-        throw new Error("API returned non-JSON (see Debug logs)");
-      }
-
-      // If the server sends a logs array, surface it
-      if (Array.isArray(data?.logs)) {
-        setLogs((prev) => [...prev, ...data.logs]);
-      }
-
-      // Helpful counts + key list
-      log("keys", data ? Object.keys(data) : []);
-      if (Array.isArray(data?.equity)) log("equity points", data.equity.length);
-      if (Array.isArray(data?.prices)) log("prices points", data.prices.length);
-      console.log("[backtest] keys:", data ? Object.keys(data) : []);
-      if (Array.isArray(data?.equity)) console.log("[backtest] equity points:", data.equity.length);
-      if (Array.isArray(data?.prices)) console.log("[backtest] prices points:", data.prices.length);
-
+      const data = await r.json();
+      appendLog("Received backtest response", { endpoint, data });
       setResult(data);
     } catch (e: any) {
-      const msg = e?.message || String(e);
-      setError(`Backtest failed: ${msg}`);
-      log("exception", msg);
-      console.error("[backtest] exception:", e);
+      const message = `Backtest failed: ${e.message || e}`;
+      appendLog(message);
+      setError(message);
     } finally {
       setRunning(false);
     }
@@ -238,29 +207,40 @@ export default function Page() {
       )}
 
       {result && (
-        <pre style={{ marginTop: 16, background: "#f5f5f5", padding: 12, borderRadius: 8 }}>
+        <pre
+          style={{
+            marginTop: 16,
+            background: "#0f172a",
+            color: "#e2e8f0",
+            padding: 12,
+            borderRadius: 8,
+            border: "1px solid #1e293b",
+            whiteSpace: "pre-wrap",
+          }}
+        >
           {JSON.stringify(result.summary ?? result, null, 2)}
         </pre>
       )}
-      {logs.length > 0 && (
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>Debug logs</div>
-          <pre
-            style={{
-              background: "#0b1020",
-              color: "#e6f1ff",
-              padding: 12,
-              borderRadius: 8,
-              whiteSpace: "pre-wrap",
-              maxHeight: 260,
-              overflow: "auto",
-              fontSize: 13,
-            }}
-          >
-            {logs.join("\n")}
-          </pre>
-        </div>
-      )}
+
+      <div style={{ marginTop: 24 }}>
+        <h2 style={{ fontSize: 18, marginBottom: 8 }}>Debug logs</h2>
+        <pre
+          style={{
+            background: "#111827",
+            color: "#d1d5db",
+            padding: 12,
+            borderRadius: 8,
+            border: "1px solid #1f2937",
+            whiteSpace: "pre-wrap",
+            maxHeight: 240,
+            overflowY: "auto",
+            fontSize: 13,
+          }}
+        >
+          {logs.length ? logs.join("\n\n") : "Run a backtest to view debug logs."}
+        </pre>
+      </div>
+
       <p style={{ marginTop: 24, color: "#666" }}>
         Tip: date-times are interpreted in your local timezone then converted to UTC for the API.
       </p>
