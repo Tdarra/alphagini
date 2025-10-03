@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  output: 'standalone',     // smaller Cloud Run image
+  reactStrictMode: true
 };
 
 export default nextConfig;
