@@ -2,6 +2,8 @@
 
 import React from "react";
 
+import EquityChart from "../components/EquityChart";
+
 type SymbolInfo = {
   symbol: string;
   timeframe: string;
@@ -28,6 +30,8 @@ export default function Page() {
   const [start, setStart] = React.useState(""); // datetime-local
   const [end, setEnd] = React.useState("");
   const [cashStart, setCashStart] = React.useState(100000);
+  const [model, setModel] = React.useState("sma");
+  const [strategy, setStrategy] = React.useState("sma_cross");
   const [running, setRunning] = React.useState(false);
   const [result, setResult] = React.useState<any>(null);
   const [logs, setLogs] = React.useState<string[]>([]);
@@ -87,8 +91,8 @@ export default function Page() {
         timeframe,
         start: toISOStringZ(start),
         end: toISOStringZ(end),
-        model: "sma",
-        strategy: "sma_cross",
+        model,
+        strategy,
         cash_start: cashStart,
         sma_fast: 10,
         sma_slow: 30,
@@ -155,6 +159,30 @@ export default function Page() {
         </label>
 
         <label>
+          <div>Model</div>
+          <select
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            style={{ width: "100%", padding: 8 }}
+          >
+            <option value="naive">Naive (previous close)</option>
+            <option value="sma">Simple moving average</option>
+          </select>
+        </label>
+
+        <label>
+          <div>Strategy</div>
+          <select
+            value={strategy}
+            onChange={(e) => setStrategy(e.target.value)}
+            style={{ width: "100%", padding: 8 }}
+          >
+            <option value="buy_hold">Buy &amp; hold</option>
+            <option value="sma_cross">SMA crossover</option>
+          </select>
+        </label>
+
+        <label>
           <div>Start (local)</div>
           <input
             type="datetime-local"
@@ -207,19 +235,7 @@ export default function Page() {
       )}
 
       {result && (
-        <pre
-          style={{
-            marginTop: 16,
-            background: "#0f172a",
-            color: "#e2e8f0",
-            padding: 12,
-            borderRadius: 8,
-            border: "1px solid #1e293b",
-            whiteSpace: "pre-wrap",
-          }}
-        >
-          {JSON.stringify(result.summary ?? result, null, 2)}
-        </pre>
+        <ResultSection result={result} />
       )}
 
       <div style={{ marginTop: 24 }}>
@@ -245,5 +261,126 @@ export default function Page() {
         Tip: date-times are interpreted in your local timezone then converted to UTC for the API.
       </p>
     </main>
+  );
+}
+
+type BacktestResult = {
+  summary?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  equity_curve?: { ts: string; equity: number }[];
+};
+
+function ResultSection({ result }: { result: BacktestResult }) {
+  const metrics = result.metrics ?? {};
+  const metricLabels: Record<string, string> = {
+    sharpe: "Sharpe Ratio",
+    win_rate: "Win Rate",
+    max_drawdown: "Max Drawdown",
+    abs_return_usd: "Absolute Return ($)",
+    rel_return: "Relative Return",
+    rmse: "RMSE",
+  };
+  const metricOrder = Object.keys(metricLabels) as (keyof typeof metricLabels)[];
+
+  const formatMetric = React.useCallback((key: string, value: number) => {
+    if (value === null || value === undefined) return "—";
+    if (key === "abs_return_usd") {
+      return new Intl.NumberFormat(undefined, {
+        style: "currency",
+        currency: "USD",
+        maximumFractionDigits: 0,
+      }).format(value);
+    }
+    if (key === "win_rate" || key === "rel_return" || key === "max_drawdown") {
+      return `${(value * 100).toFixed(2)}%`;
+    }
+    if (key === "sharpe") {
+      return value.toFixed(2);
+    }
+    if (key === "rmse") {
+      return value.toFixed(4);
+    }
+    return value.toString();
+  }, []);
+
+  const equityCurve = React.useMemo(() => {
+    const points = result.equity_curve ?? [];
+    return {
+      ts: points.map((p) => p.ts),
+      equity: points.map((p) => p.equity),
+    };
+  }, [result.equity_curve]);
+
+  const hasMetrics = metricOrder.some((key) => typeof metrics[key] === "number");
+
+  return (
+    <div style={{ marginTop: 24, display: "flex", flexDirection: "column", gap: 24 }}>
+      {hasMetrics && (
+        <div>
+          <h2 style={{ fontSize: 18, marginBottom: 12 }}>Backtest metrics</h2>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+              gap: 12,
+            }}
+          >
+            {metricOrder.map((key) => {
+              const raw = metrics[key];
+              if (typeof raw !== "number") return null;
+              return (
+                <div
+                  key={key}
+                  style={{
+                    background: "#0f172a",
+                    color: "#e2e8f0",
+                    borderRadius: 8,
+                    padding: "12px 16px",
+                    border: "1px solid #1e293b",
+                  }}
+                >
+                  <div style={{ fontSize: 12, textTransform: "uppercase", color: "#94a3b8" }}>
+                    {metricLabels[key] ?? key}
+                  </div>
+                  <div style={{ fontSize: 20, fontWeight: 600, marginTop: 4 }}>
+                    {formatMetric(key, raw)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <h2 style={{ fontSize: 18, marginBottom: 12 }}>Equity curve</h2>
+        <div
+          style={{
+            background: "#0f172a",
+            borderRadius: 8,
+            border: "1px solid #1e293b",
+            padding: 16,
+          }}
+        >
+          <EquityChart ts={equityCurve.ts} equity={equityCurve.equity} />
+        </div>
+      </div>
+
+      <div>
+        <h2 style={{ fontSize: 18, marginBottom: 8 }}>Raw response</h2>
+        <pre
+          style={{
+            background: "#0f172a",
+            color: "#e2e8f0",
+            padding: 12,
+            borderRadius: 8,
+            border: "1px solid #1e293b",
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {JSON.stringify(result.summary ?? result, null, 2)}
+        </pre>
+      </div>
+    </div>
   );
 }
