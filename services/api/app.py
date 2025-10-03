@@ -1,4 +1,5 @@
 import hashlib, json, os, time
+import logging
 from dataclasses import asdict, dataclass
 from typing import Dict, List
 
@@ -15,6 +16,9 @@ TABLE_OHLCV = f"{PROJECT}.{DATASET_MD}.ohlcv"
 
 DATASET_EXP = os.environ.get("ALPHAGINI_EXP_DATASET", "alphagini_experiments")
 TABLE_BT = f"{PROJECT}.{DATASET_EXP}.backtests"
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("alphagini.api")
 
 app = FastAPI(title="alphagini-api", version="0.1")
 
@@ -200,6 +204,7 @@ def health():
 
 @app.get("/symbols")
 def symbols():
+    logger.info("Fetching symbols from %s", TABLE_OHLCV)
     client = bq()
     q = f"""
       SELECT symbol, timeframe, MIN(ts) first_ts, MAX(ts) last_ts, COUNT(*) row_count
@@ -207,18 +212,33 @@ def symbols():
       GROUP BY symbol, timeframe
       ORDER BY symbol, timeframe
     """
-    return [dict(r) for r in client.query(q).result()]
+    rows = [dict(r) for r in client.query(q).result()]
+    logger.info("Returning %d symbols", len(rows))
+    return rows
 
 @app.post("/backtest")
 def backtest(req: BacktestRequest):
+    payload = req.model_dump()
+    logger.info("Received backtest request: %s", json.dumps(payload, sort_keys=True))
     t0 = time.time()
+    cache_id = cache_key(req)
     # try cache first
     cached = fetch_cached(req)
     if cached:
+        logger.info("Cache hit for request %s", cache_id)
         cached["_cached"] = True
+        logger.info("Returning cached metrics: %s", json.dumps(cached, sort_keys=True))
         return {"summary": req.model_dump(), "metrics": cached, "equity_curve": []}
 
     df = load_ohlcv(req.symbol, req.timeframe, req.start, req.end)
+    logger.info(
+        "Loaded %d OHLCV rows for %s %s between %s and %s",
+        len(df),
+        req.symbol,
+        req.timeframe,
+        req.start,
+        req.end,
+    )
 
     # forecast series (we calculate RMSE vs close)
     preds = model_predict(df, req.model, req.sma_fast, req.sma_slow)
@@ -241,9 +261,13 @@ def backtest(req: BacktestRequest):
         "rmse": rmse,
     }
     duration_ms = int((time.time() - t0) * 1000)
+    logger.info("Computed metrics in %d ms: %s", duration_ms, json.dumps(metrics, sort_keys=True))
 
     # persist
     persist_result(req, metrics, duration_ms)
+    logger.info("Persisted backtest result for %s", cache_id)
 
     curve = [{"ts": str(ts), "equity": float(val)} for ts, val in eq.items()]
-    return {"summary": req.model_dump(), "metrics": metrics, "equity_curve": curve}
+    response_payload = {"summary": req.model_dump(), "metrics": metrics, "equity_curve": curve}
+    logger.info("Sending backtest response with %d equity points", len(response_payload["equity_curve"]))
+    return response_payload
