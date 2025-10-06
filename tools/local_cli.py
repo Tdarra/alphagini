@@ -10,6 +10,7 @@ Usage examples are at the bottom of this file.
 """
 import sys
 import os
+import jsonpickle
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 
@@ -288,7 +289,7 @@ def main():
             sma_fast=int(args.sma_fast),
             sma_slow=int(args.sma_slow),
         )
-        print(json.dumps(out, indent=2))
+        print(json.dumps(jsonpickle.encode(out), indent=2))
     elif args.cmd == "train":
         out = run_training(
             df=df,
@@ -298,7 +299,7 @@ def main():
             q=args.q,
             train_ratio=args.train_ratio,
         )
-        print(json.dumps(out, indent=2))
+        print(json.dumps(jsonpickle.encode(out), indent=2))
     else:
         raise SystemExit("unknown subcommand")
 
