@@ -22,6 +22,7 @@ python tools/local_cli.py backtest \
 The CLI reuses the same strategy/metrics functions that power the API (imports from services/api), so results match what you’ll deploy.
 
 ### 🗂️ Repo Structure
+```
 alphagini/
 ├─ services/
 │  ├─ api/
@@ -43,7 +44,7 @@ alphagini/
 │  └─ setup_local.ps1
 ├─ activate_local.sh       # Activates venv and sets PYTHONPATH=.
 └─ README.md
-
+```
 ### 🧰 Local Development
 1) Environment
 
