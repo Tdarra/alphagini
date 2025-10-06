@@ -48,7 +48,7 @@ alphagini/
 └─ README.md
 ```
 ### 🧰 Local Development
-1) Environment
+1. Environment
 
 ```
 ./scripts/setup_local.sh
@@ -60,7 +60,7 @@ This creates .venv_local, installs pandas/numpy/fastapi (for import compatibilit
 
 We include google-cloud-bigquery & db-dtypes in local deps because app.py imports them—local runs won’t hit GCP, but imports succeed.
 
-2) CSV Schema (ccxt-style)
+2. CSV Schema (ccxt-style)
 
 Columns expected (case-insensitive):
 
@@ -71,7 +71,7 @@ Optional: volume, symbol, timeframe, exchange
 ts must be UTC (e.g., 2024-08-01T00:00:00Z).
 If your CSV lacks symbol/timeframe, pass them via CLI flags.
 
-3) Local CLI
+3. Local CLI
 
 Backtest:
 ```
