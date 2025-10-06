@@ -3,3 +3,5 @@
 /taj_notes.txt
 /services/ingest/*.csv
 /services/ingest/normalized/*.csv
+/.venv_local/
+/data/
