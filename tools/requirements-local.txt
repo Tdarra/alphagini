@@ -1,0 +1,17 @@
+# ---- core numeric / data ----
+pandas==2.2.2
+numpy==1.26.4
+python-dateutil>=2.8.2
+pytz>=2023.3
+# optional: local training helpers (if you call them from services/api)
+statsmodels==0.14.2
+
+# ---- match imports used by services/api (import compatibility only) ----
+fastapi==0.111.0
+uvicorn==0.30.3
+pydantic==2.7.4
+
+# If services/api/app.py imports BigQuery/db-dtypes even when unused locally:
+google-cloud-bigquery==3.25.0
+db-dtypes==1.2.0
+google-auth>=2.30.0
