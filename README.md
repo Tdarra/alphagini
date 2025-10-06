@@ -8,16 +8,18 @@ Data schema follows ccxt-style OHLCV for easy continuous refresh.
 
 ## 🚦 Quick Start (local, no GCP)
 **From repo root**
+```
 ./scripts/setup_local.sh       # creates .venv_local and installs local deps
 source ./activate_local.sh     # activates venv and sets PYTHONPATH=.
-
+```
 **Run a local backtest against a CSV (no BigQuery, no Cloud Run)**
+```
 python tools/local_cli.py backtest \
   --csv services/ingest/normalized/coinbase_BTC_USD_5m_ccxt.csv \
   --symbol BTC/USD --timeframe 5m \
   --start 2025-08-01T00:00:00Z --end 2025-08-03T00:00:00Z \
   --strategy sma_cross --cash 100000 --sma-fast 10 --sma-slow 30
-
+```
 
 The CLI reuses the same strategy/metrics functions that power the API (imports from services/api), so results match what you’ll deploy.
 
@@ -106,13 +108,13 @@ export ALPHAGINI_EXP_DATASET="alphagini_experiments"
 `uvicorn services.api.app:app --host 0.0.0.0 --port 8080 --reload`
 
 **In another shell**
-curl http://localhost:8080/health
+`curl http://localhost:8080/health`
 
 
 Then point the web app at your local API:
 
 **web/.env.local**
-NEXT_PUBLIC_API_URL=http://localhost:8080
+`NEXT_PUBLIC_API_URL=http://localhost:8080`
 
 ### 🌐 Dashboard (Next.js)
 **From repo root**
@@ -139,15 +141,16 @@ If the UI calls /undefined/symbols, you didn’t inject NEXT_PUBLIC_API_URL at b
 ## ☁️ GCP Deployment (Cloud Run + BigQuery)
 Datasets & Table
 
-Market data (read): alphagini_marketdata.ohlcv
+Market data (read): TBD
 Schema (ccxt-like): exchange STRING, symbol STRING, timeframe STRING, ts TIMESTAMP, open FLOAT64, high FLOAT64, low FLOAT64, close FLOAT64, volume FLOAT64
 
 Experiments (write): alphagini_experiments (your backtests, metrics, etc.)
 
-Deploy API (alphagini-api)
+Deploy API (alphagini-api):
+```
 export PROJECT_ID="alpha-gini"
 export REGION="us-central1"
-
+```
 **Build image (Cloud Build)**
 `gcloud builds submit services/api --tag gcr.io/$PROJECT_ID/alphagini-api:latest`
 
@@ -189,7 +192,7 @@ bq --project_id="$PROJECT_ID" update --dataset \
 ```
 
 
-Verify:
+**Verify:**
 ```
 API_URL=$(gcloud run services describe alphagini-api --region $REGION --format='value(status.url)')
 curl "$API_URL/health"
@@ -221,7 +224,7 @@ Open the printed alphagini-web URL. Network calls should hit GET {API_URL}/symbo
 
 **Common gotchas:**
 
-/undefined/symbols → you didn’t pass --set-build-env-vars NEXT_PUBLIC_API_URL=...
+/undefined/symbols → you didn’t pass `--set-build-env-vars NEXT_PUBLIC_API_URL=...`
 
 “container failed to listen on $PORT” → set start to next start -p $PORT
 
